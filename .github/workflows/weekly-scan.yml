@@ -16,6 +16,11 @@ on:
       project_label:
         required: true
         type: string
+      upload_to_code_scanning:
+        description: "SARIF を GitHub Code Scanning タブに転送するか (private リポは GHAS 課金が必要、default false)"
+        required: false
+        type: boolean
+        default: false
     secrets:
       APPS_SCRIPT_URL:
         required: true
@@ -39,6 +44,8 @@ jobs:
       security-events: write
       actions: read
     with:
+      upload-sarif: ${{ inputs.upload_to_code_scanning }}
+      fail-on-vuln: false
       scan-args: |-
         --recursive
         --skip-git
@@ -79,22 +86,63 @@ jobs:
             "${APPS_SCRIPT_URL}" "${APPS_SCRIPT_KEY}" || true
 
   # ──────────────────────────────────────────────────────────────
-  # 3. gitleaks (履歴全体)
+  # 3. gitleaks (履歴全体) — 公式 Action は組織で有料化されたためバイナリ直叩き
   # ──────────────────────────────────────────────────────────────
   gitleaks-history:
     name: gitleaks (全履歴)
     runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "PIN_AFTER_FIRST_RUN"
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
-      - name: Run gitleaks (full history)
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.7
+      - name: Install gitleaks binary
+        run: |
+          set -euo pipefail
+          ASSET="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${ASSET}"
+          curl -fsSL -o "${ASSET}" "${URL}"
+          if [ "${GITLEAKS_SHA256}" != "PIN_AFTER_FIRST_RUN" ]; then
+            echo "${GITLEAKS_SHA256}  ${ASSET}" | sha256sum -c -
+          fi
+          tar xzf "${ASSET}" gitleaks
+          install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Run gitleaks (detect, 全履歴)
+        run: |
+          set +e
+          gitleaks detect \
+            --source . \
+            --report-format sarif \
+            --report-path gitleaks-history.sarif \
+            --redact \
+            --no-banner \
+            --exit-code 2
+          rc=$?
+          echo "gitleaks exit=${rc}"
+          exit 0
+
+      - name: Upload SARIF (GHAS only)
+        if: always() && inputs.upload_to_code_scanning && hashFiles('gitleaks-history.sarif') != ''
+        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        with:
+          sarif_file: gitleaks-history.sarif
+          category: gitleaks-history
+
+      - name: Forward to router
+        if: always() && hashFiles('gitleaks-history.sarif') != ''
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITLEAKS_CONFIG: ""   # デフォルト設定
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          APPS_SCRIPT_KEY: ${{ secrets.APPS_SCRIPT_KEY }}
+          PROJECT: ${{ inputs.project_label }}
+        run: |
+          .github/scripts/post-sarif.sh gitleaks-history.sarif "$PROJECT" "weekly-gitleaks" \
+            "${APPS_SCRIPT_URL}" "${APPS_SCRIPT_KEY}" || true
 
   # ──────────────────────────────────────────────────────────────
   # 4. Laravel 専用 (全件 SCA + taint)
@@ -120,8 +168,13 @@ jobs:
       - name: composer audit (全件)
         run: composer audit --format=json > composer-audit-full.json || true
 
-      - name: Psalm taint (全件)
-        run: vendor/bin/psalm --taint-analysis --no-progress --no-cache --report=psalm-full-sarif.sarif || true
+      - name: Psalm taint (全件・psalm.xml がコミットされているリポのみ)
+        run: |
+          if [ -f psalm.xml ] && [ -x vendor/bin/psalm ]; then
+            vendor/bin/psalm --taint-analysis --no-progress --no-cache --report=psalm-full-sarif.sarif || true
+          else
+            echo "psalm.xml or vendor/bin/psalm が無いためスキップ (Psalm 未導入リポ)"
+          fi
 
       - name: PHPCS Security Audit
         run: |
@@ -191,7 +244,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Trivy fs
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: "fs"
           severity: "CRITICAL,HIGH,MEDIUM,LOW"
@@ -199,7 +252,7 @@ jobs:
           output: "trivy-fs-full.sarif"
 
       - name: Trivy config (IaC)
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: "config"
           severity: "CRITICAL,HIGH,MEDIUM"

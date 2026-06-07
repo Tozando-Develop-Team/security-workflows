@@ -35,6 +35,11 @@ on:
         description: "Short project identifier (e.g. your-project-name)"
         required: true
         type: string
+      upload_to_code_scanning:
+        description: "SARIF を GitHub Code Scanning タブに転送するか (private リポは GHAS 課金が必要、default false)"
+        required: false
+        type: boolean
+        default: false
     secrets:
       APPS_SCRIPT_URL:
         required: true
@@ -63,6 +68,9 @@ jobs:
       security-events: write
       actions: read
     with:
+      # upload-sarif は GHAS (Advanced Security) が有効な repo のみで成功するため既定 OFF
+      upload-sarif: ${{ inputs.upload_to_code_scanning }}
+      fail-on-vuln: false  # router 側で重大度判定するので step 自体は緑にする
       scan-args: |-
         --recursive
         --skip-git
@@ -90,9 +98,9 @@ jobs:
             --severity=ERROR --severity=WARNING --severity=INFO \
             --error || true
 
-      - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@v3 # TODO: pin to SHA after first successful run
-        if: always()
+      - name: Upload SARIF (GHAS only)
+        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        if: always() && inputs.upload_to_code_scanning
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -108,22 +116,67 @@ jobs:
             "${APPS_SCRIPT_URL}" "${APPS_SCRIPT_KEY}" || true
 
   # ──────────────────────────────────────────────────────────────
-  # 3. gitleaks (Secrets)
+  # 3. gitleaks (Secrets) — 公式 Action は組織で有料化されたためバイナリ直叩き
   # ──────────────────────────────────────────────────────────────
   gitleaks:
     name: gitleaks (Secrets)
     runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      # 公式リリース zip の SHA256 (v8.30.1 linux_x64) — リリース固定で再現性確保
+      GITLEAKS_SHA256: "PIN_AFTER_FIRST_RUN"
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
-      - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.7
+      - name: Install gitleaks binary
+        run: |
+          set -euo pipefail
+          ASSET="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${ASSET}"
+          curl -fsSL -o "${ASSET}" "${URL}"
+          # TODO: SHA256 検証を有効化（初回成功後に env.GITLEAKS_SHA256 を実値に差し替え）
+          if [ "${GITLEAKS_SHA256}" != "PIN_AFTER_FIRST_RUN" ]; then
+            echo "${GITLEAKS_SHA256}  ${ASSET}" | sha256sum -c -
+          fi
+          tar xzf "${ASSET}" gitleaks
+          install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Run gitleaks (detect)
+        id: gitleaks_detect
+        run: |
+          set +e
+          gitleaks detect \
+            --source . \
+            --report-format sarif \
+            --report-path gitleaks.sarif \
+            --redact \
+            --no-banner \
+            --exit-code 2
+          rc=$?
+          echo "exit_code=${rc}" >> "$GITHUB_OUTPUT"
+          # exit 1 = leak found, 2 = error, 0 = clean. step は常に緑にして router で集約判定
+          exit 0
+
+      - name: Upload SARIF (GHAS only)
+        if: always() && inputs.upload_to_code_scanning && hashFiles('gitleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+      - name: Forward to router
+        if: always() && hashFiles('gitleaks.sarif') != ''
         env:
-          GITLEAKS_NOTIFY_USER_LIST: "@r-ito"
-          GITHUB_TOKEN: ${{ github.token }}
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          APPS_SCRIPT_KEY: ${{ secrets.APPS_SCRIPT_KEY }}
+          PROJECT: ${{ inputs.project_label }}
+        run: |
+          .github/scripts/post-sarif.sh gitleaks.sarif "$PROJECT" "gitleaks" \
+            "${APPS_SCRIPT_URL}" "${APPS_SCRIPT_KEY}" || true
 
   # ──────────────────────────────────────────────────────────────
   # 4. Laravel 専用 (composer audit + Psalm taint + Larastan)
@@ -149,14 +202,15 @@ jobs:
       - name: composer audit (SCA)
         run: composer audit --format=json > composer-audit.json || true
 
-      - name: Psalm taint analysis
+      - name: Psalm taint analysis (psalm.xml がコミットされているリポのみ)
+        id: psalm_run
         run: |
-          if [ -f psalm.xml ]; then
+          if [ -f psalm.xml ] && [ -x vendor/bin/psalm ]; then
             vendor/bin/psalm --taint-analysis --report=psalm-sarif.sarif --no-progress || true
+            echo "ran=true" >> "$GITHUB_OUTPUT"
           else
-            echo "psalm.xml not found, generating default config"
-            vendor/bin/psalm --init || true
-            vendor/bin/psalm --taint-analysis --report=psalm-sarif.sarif --no-progress || true
+            echo "psalm.xml or vendor/bin/psalm が無いためスキップ (Psalm 未導入リポ)"
+            echo "ran=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Larastan
@@ -165,9 +219,9 @@ jobs:
             vendor/bin/phpstan analyse --error-format=json > larastan.json || true
           fi
 
-      - name: Upload Psalm SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3 # TODO: pin to SHA after first successful run
+      - name: Upload Psalm SARIF (GHAS only)
+        if: always() && inputs.upload_to_code_scanning && steps.psalm_run.outputs.ran == 'true'
+        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
         with:
           sarif_file: psalm-sarif.sarif
           category: psalm-taint
@@ -238,7 +292,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Run Trivy (filesystem scan)
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0 (post-supply-chain-incident pinned)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: "fs"
           scan-ref: "."
@@ -247,9 +301,9 @@ jobs:
           output: "trivy-fs.sarif"
           exit-code: "0"
 
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3 # TODO: pin to SHA after first successful run
+      - name: Upload SARIF (GHAS only)
+        if: always() && inputs.upload_to_code_scanning && hashFiles('trivy-fs.sarif') != ''
+        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
         with:
           sarif_file: trivy-fs.sarif
           category: trivy
