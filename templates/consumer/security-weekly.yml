@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  actions: read  # 入れ子の reusable workflow (OSV-Scanner) が要求
 
 jobs:
   scan:

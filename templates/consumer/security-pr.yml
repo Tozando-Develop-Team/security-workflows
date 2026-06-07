@@ -23,6 +23,7 @@ permissions:
   contents: read
   security-events: write
   pull-requests: write
+  actions: read  # 入れ子の reusable workflow (OSV-Scanner) が要求
 
 jobs:
   scan:
