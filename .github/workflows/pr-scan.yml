@@ -56,21 +56,17 @@ jobs:
   # ──────────────────────────────────────────────────────────────
   osv-diff:
     name: OSV-Scanner (差分)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-
-      # 公式 reusable を直接呼ぶ
-      - name: Run OSV-Scanner on diff
-        uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@e69cc6c86b31f1e7e23935bbe7031b50e51082de # v2.0.0
-        with:
-          scan-args: |-
-            --recursive
-            --skip-git
-            ./
+    # Nested reusable workflow call — must be top-level jobs.*.uses, not a step
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@e69cc6c86b31f1e7e23935bbe7031b50e51082de # v2.0.0
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    with:
+      scan-args: |-
+        --recursive
+        --skip-git
+        ./
 
   # ──────────────────────────────────────────────────────────────
   # 2. Semgrep (SAST)
@@ -79,7 +75,7 @@ jobs:
     name: Semgrep SAST
     runs-on: ubuntu-latest
     container:
-      image: semgrep/semgrep:1.95.0@sha256:dc52d6f928b8f9d3c4f9b8e9c1234567890abcdef1234567890abcdef12345678
+      image: semgrep/semgrep:1.95.0  # TODO: pin to digest after first successful run
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -95,7 +91,7 @@ jobs:
             --error || true
 
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@4c8c2f1a5b0e1b1234567890abcdef1234567890 # v3.27.5
+        uses: github/codeql-action/upload-sarif@v3 # TODO: pin to SHA after first successful run
         if: always()
         with:
           sarif_file: semgrep.sarif
@@ -171,7 +167,7 @@ jobs:
 
       - name: Upload Psalm SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@4c8c2f1a5b0e1b1234567890abcdef1234567890 # v3.27.5
+        uses: github/codeql-action/upload-sarif@v3 # TODO: pin to SHA after first successful run
         with:
           sarif_file: psalm-sarif.sarif
           category: psalm-taint
@@ -253,7 +249,7 @@ jobs:
 
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@4c8c2f1a5b0e1b1234567890abcdef1234567890 # v3.27.5
+        uses: github/codeql-action/upload-sarif@v3 # TODO: pin to SHA after first successful run
         with:
           sarif_file: trivy-fs.sarif
           category: trivy

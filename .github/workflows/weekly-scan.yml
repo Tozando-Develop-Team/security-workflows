@@ -32,20 +32,17 @@ jobs:
   # ──────────────────────────────────────────────────────────────
   osv-full:
     name: OSV-Scanner (全件)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Run OSV-Scanner (full)
-        uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@e69cc6c86b31f1e7e23935bbe7031b50e51082de # v2.0.0
-        with:
-          scan-args: |-
-            --recursive
-            --skip-git
-            --format=sarif
-            --output=osv-full.sarif
-            ./
+    # Nested reusable workflow call — must be top-level jobs.*.uses, not a step
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@e69cc6c86b31f1e7e23935bbe7031b50e51082de # v2.0.0
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    with:
+      scan-args: |-
+        --recursive
+        --skip-git
+        ./
 
   # ──────────────────────────────────────────────────────────────
   # 2. Semgrep 全件 + 全カテゴリ
