@@ -1,0 +1,35 @@
+# 消費側リポへドロップインするテンプレ
+# 配置場所: <consumer-repo>/.github/workflows/security-pr.yml
+#
+# 必要な変更:
+#   - <STACK>        : laravel / nextjs / static のいずれか
+#   - <PROJECT_LABEL>: Short project identifier (e.g. your-project-name)
+#   - <SHA>          : security-workflows の参照する commit SHA (タグ NG・必ず完全 SHA)
+#
+# 必要な Secret (Org or Repo レベル):
+#   APPS_SCRIPT_URL  : Apps Script Web App URL
+#   APPS_SCRIPT_KEY  : HMAC 共有鍵
+
+name: Security (PR)
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  scan:
+    uses: Tozando-Develop-Team/security-workflows/.github/workflows/pr-scan.yml@<SHA>
+    with:
+      stack: "<STACK>"
+      project_label: "<PROJECT_LABEL>"
+    secrets:
+      APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+      APPS_SCRIPT_KEY: ${{ secrets.APPS_SCRIPT_KEY }}

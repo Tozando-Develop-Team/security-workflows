@@ -1,0 +1,235 @@
+# Reusable workflow: 週次の全件棚卸し
+# 消費側リポは .github/workflows/security-weekly.yml で
+#   schedule: - cron: "0 0 * * 1"  # 月曜 09:00 JST
+# を設定して呼ぶ
+#
+# PR 時の差分スキャンとは別に、既存依存にも遡って棚卸しを行う
+
+name: Weekly Security Scan (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      stack:
+        required: true
+        type: string
+      project_label:
+        required: true
+        type: string
+    secrets:
+      APPS_SCRIPT_URL:
+        required: true
+      APPS_SCRIPT_KEY:
+        required: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # 1. OSV-Scanner (全件 = 既存依存も含めて)
+  # ──────────────────────────────────────────────────────────────
+  osv-full:
+    name: OSV-Scanner (全件)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run OSV-Scanner (full)
+        uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@e69cc6c86b31f1e7e23935bbe7031b50e51082de # v2.0.0
+        with:
+          scan-args: |-
+            --recursive
+            --skip-git
+            --format=sarif
+            --output=osv-full.sarif
+            ./
+
+  # ──────────────────────────────────────────────────────────────
+  # 2. Semgrep 全件 + 全カテゴリ
+  # ──────────────────────────────────────────────────────────────
+  semgrep-full:
+    name: Semgrep (全 SAST)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.95.0  # TODO: SHA pin at deploy via scripts/resolve-shas.sh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run Semgrep with broader rulesets
+        run: |
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --config=p/cwe-top-25 \
+            --config=p/r2c-security-audit \
+            --sarif --output=semgrep-full.sarif \
+            --severity=ERROR --severity=WARNING || true
+
+      - name: Forward to router
+        if: always()
+        env:
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          APPS_SCRIPT_KEY: ${{ secrets.APPS_SCRIPT_KEY }}
+          PROJECT: ${{ inputs.project_label }}
+          SCAN_TYPE: weekly-semgrep
+        run: |
+          .github/scripts/post-sarif.sh semgrep-full.sarif "$PROJECT" "$SCAN_TYPE" \
+            "${APPS_SCRIPT_URL}" "${APPS_SCRIPT_KEY}" || true
+
+  # ──────────────────────────────────────────────────────────────
+  # 3. gitleaks (履歴全体)
+  # ──────────────────────────────────────────────────────────────
+  gitleaks-history:
+    name: gitleaks (全履歴)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks (full history)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.7
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_CONFIG: ""   # デフォルト設定
+
+  # ──────────────────────────────────────────────────────────────
+  # 4. Laravel 専用 (全件 SCA + taint)
+  # ──────────────────────────────────────────────────────────────
+  laravel-full:
+    name: Laravel 全件 SAST
+    if: inputs.stack == 'laravel'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@9e72090525849c5e82e596468b86eb55e9cc5401 # v2.32.0
+        with:
+          php-version: "8.3"
+          tools: composer:v2
+          coverage: none
+
+      - name: Install
+        run: composer install --no-interaction --prefer-dist
+
+      - name: composer audit (全件)
+        run: composer audit --format=json > composer-audit-full.json || true
+
+      - name: Psalm taint (全件)
+        run: vendor/bin/psalm --taint-analysis --no-progress --no-cache --report=psalm-full-sarif.sarif || true
+
+      - name: PHPCS Security Audit
+        run: |
+          composer require --dev squizlabs/php_codesniffer pheromone/phpcs-security-audit --no-progress
+          vendor/bin/phpcs --standard=Security --report=json -p ./app ./routes ./database > phpcs-security.json || true
+
+      - name: Forward to router
+        if: always()
+        env:
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          APPS_SCRIPT_KEY: ${{ secrets.APPS_SCRIPT_KEY }}
+          PROJECT: ${{ inputs.project_label }}
+        run: |
+          .github/scripts/post-audit.sh composer-audit-full.json "$PROJECT" "weekly-composer-audit" \
+            "${APPS_SCRIPT_URL}" "${APPS_SCRIPT_KEY}" || true
+
+  # ──────────────────────────────────────────────────────────────
+  # 5. Next.js 専用 (全件 SCA + ESLint security)
+  # ──────────────────────────────────────────────────────────────
+  nextjs-full:
+    name: Next.js 全件 SAST
+    if: inputs.stack == 'nextjs'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: npm audit (全件)
+        run: npm audit --json --audit-level=low > npm-audit-full.json || true
+
+      - name: ESLint security 全件
+        run: |
+          if [ -f .eslintrc.security.cjs ] || [ -f .eslintrc.security.json ]; then
+            npx eslint --config .eslintrc.security.cjs \
+              --format json --output-file eslint-security-full.json \
+              --no-error-on-unmatched-pattern \
+              "**/*.{ts,tsx,js,jsx}" --ignore-pattern "node_modules" --ignore-pattern ".next" || true
+          fi
+
+      - name: Forward to router
+        if: always()
+        env:
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          APPS_SCRIPT_KEY: ${{ secrets.APPS_SCRIPT_KEY }}
+          PROJECT: ${{ inputs.project_label }}
+        run: |
+          .github/scripts/post-audit.sh npm-audit-full.json "$PROJECT" "weekly-npm-audit" \
+            "${APPS_SCRIPT_URL}" "${APPS_SCRIPT_KEY}" || true
+
+  # ──────────────────────────────────────────────────────────────
+  # 6. Trivy (全件)
+  # ──────────────────────────────────────────────────────────────
+  trivy-full:
+    name: Trivy (全件 fs + config)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Trivy fs
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          scan-type: "fs"
+          severity: "CRITICAL,HIGH,MEDIUM,LOW"
+          format: "sarif"
+          output: "trivy-fs-full.sarif"
+
+      - name: Trivy config (IaC)
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          scan-type: "config"
+          severity: "CRITICAL,HIGH,MEDIUM"
+          format: "sarif"
+          output: "trivy-config-full.sarif"
+
+  # ──────────────────────────────────────────────────────────────
+  # 7. Weekly summary trigger (router 側で集計依頼)
+  # ──────────────────────────────────────────────────────────────
+  request-summary:
+    name: 週次サマリ作成依頼
+    needs: [osv-full, semgrep-full, gitleaks-history, trivy-full]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Apps Script for weekly summary
+        env:
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          APPS_SCRIPT_KEY: ${{ secrets.APPS_SCRIPT_KEY }}
+          PROJECT: ${{ inputs.project_label }}
+        run: |
+          payload=$(jq -n \
+            --arg project "$PROJECT" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{event: "weekly_summary_request", project: $project, run_url: $run_url, ts: now}')
+          signature=$(echo -n "$payload" | openssl dgst -sha256 -hmac "$APPS_SCRIPT_KEY" | sed 's/^.* //')
+          curl -sS -X POST "$APPS_SCRIPT_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Signature: $signature" \
+            -d "$payload" || true

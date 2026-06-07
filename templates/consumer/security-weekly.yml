@@ -1,0 +1,24 @@
+# 消費側リポへドロップインするテンプレ
+# 配置場所: <consumer-repo>/.github/workflows/security-weekly.yml
+
+name: Security (Weekly)
+
+on:
+  schedule:
+    # 月曜 00:00 UTC = 月曜 09:00 JST
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    uses: Tozando-Develop-Team/security-workflows/.github/workflows/weekly-scan.yml@<SHA>
+    with:
+      stack: "<STACK>"
+      project_label: "<PROJECT_LABEL>"
+    secrets:
+      APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+      APPS_SCRIPT_KEY: ${{ secrets.APPS_SCRIPT_KEY }}

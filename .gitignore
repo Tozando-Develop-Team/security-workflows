@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.env.local
+*.sarif
+/tmp/
+apps-script/.clasp.json
+.secrets-do-not-commit/
