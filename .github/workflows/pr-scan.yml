@@ -99,7 +99,7 @@ jobs:
             --error || true
 
       - name: Upload SARIF (GHAS only)
-        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         if: always() && inputs.upload_to_code_scanning
         with:
           sarif_file: semgrep.sarif
@@ -163,7 +163,7 @@ jobs:
 
       - name: Upload SARIF (GHAS only)
         if: always() && inputs.upload_to_code_scanning && hashFiles('gitleaks.sarif') != ''
-        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
@@ -221,7 +221,7 @@ jobs:
 
       - name: Upload Psalm SARIF (GHAS only)
         if: always() && inputs.upload_to_code_scanning && steps.psalm_run.outputs.ran == 'true'
-        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: psalm-sarif.sarif
           category: psalm-taint
@@ -303,7 +303,7 @@ jobs:
 
       - name: Upload SARIF (GHAS only)
         if: always() && inputs.upload_to_code_scanning && hashFiles('trivy-fs.sarif') != ''
-        uses: github/codeql-action/upload-sarif@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: trivy-fs.sarif
           category: trivy
